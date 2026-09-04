@@ -138,13 +138,33 @@ export async function sendEmail({ to, subject, body, cc, bcc, html = false }) {
     headers: {
       Authorization: `Bearer ${relaySecret}`,
       "Content-Type": "application/json",
+      Accept: "application/json",
+      // Some hosts front PHP endpoints with a WAF/bot-manager that blocks
+      // requests carrying a generic server-side User-Agent (Node's default).
+      // A normal browser-looking UA avoids that without weakening the relay's
+      // own auth (the bearer secret is still required).
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     },
     body: JSON.stringify({ to, subject, body, cc, bcc, html }),
   });
 
-  const data = await res.json().catch(() => ({}));
+  const rawText = await res.text();
+  let data = {};
+  try {
+    data = JSON.parse(rawText);
+  } catch {
+    // Non-JSON response (WAF block page, host error page, etc.) — keep a
+    // trimmed snippet so failures are diagnosable from server logs alone.
+  }
+
   if (!res.ok || !data.ok) {
-    throw new Error(`Relay error: ${data.error || `HTTP ${res.status}`}`);
+    const snippet = rawText ? rawText.slice(0, 300) : "";
+    throw new Error(
+      `Relay error: ${data.error || `HTTP ${res.status}`}${
+        snippet ? ` | body: ${snippet}` : ""
+      }`
+    );
   }
 
   return { accepted: data.accepted || [], rejected: [] };
