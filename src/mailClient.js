@@ -125,6 +125,31 @@ export async function readEmail({ folder = "INBOX", uid }) {
   });
 }
 
+const RELAY_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
+
+async function postToRelay(relayUrl, relaySecret, payload, cookie) {
+  const headers = {
+    Authorization: `Bearer ${relaySecret}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    // Some hosts front PHP endpoints with a WAF/bot-manager that blocks
+    // requests carrying a generic server-side User-Agent (Node's default).
+    // A normal browser-looking UA avoids that without weakening the relay's
+    // own auth (the bearer secret is still required).
+    "User-Agent": RELAY_USER_AGENT,
+  };
+  if (cookie) headers.Cookie = cookie;
+
+  const res = await fetch(relayUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+  const rawText = await res.text();
+  return { res, rawText };
+}
+
 export async function sendEmail({ to, subject, body, cc, bcc, html = false }) {
   if (!to) throw new Error("to is required");
   if (!subject) throw new Error("subject is required");
@@ -132,24 +157,24 @@ export async function sendEmail({ to, subject, body, cc, bcc, html = false }) {
 
   const relayUrl = requireEnv("RELAY_URL");
   const relaySecret = requireEnv("RELAY_SECRET");
+  const payload = { to, subject, body, cc, bcc, html };
 
-  const res = await fetch(relayUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${relaySecret}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      // Some hosts front PHP endpoints with a WAF/bot-manager that blocks
-      // requests carrying a generic server-side User-Agent (Node's default).
-      // A normal browser-looking UA avoids that without weakening the relay's
-      // own auth (the bearer secret is still required).
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    },
-    body: JSON.stringify({ to, subject, body, cc, bcc, html }),
-  });
+  let { res, rawText } = await postToRelay(relayUrl, relaySecret, payload);
 
-  const rawText = await res.text();
+  // Some cPanel hosts run a "Human Presence Check" (e.g. BitNinja) in front
+  // of the site: a bot gets a tiny HTML/JS page that sets a cookie and
+  // reloads, instead of the real response. A server-to-server request can't
+  // run that JS — but the check itself only verifies the cookie's presence
+  // on the next request, so we can read the cookie it wanted and retry once
+  // with it set directly.
+  const challengeMatch = rawText.match(
+    /document\.cookie\s*=\s*["']([^="']+)=([^"';]+)["']/
+  );
+  if (!res.ok && challengeMatch) {
+    const cookie = `${challengeMatch[1]}=${challengeMatch[2]}`;
+    ({ res, rawText } = await postToRelay(relayUrl, relaySecret, payload, cookie));
+  }
+
   let data = {};
   try {
     data = JSON.parse(rawText);
