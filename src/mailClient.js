@@ -1,5 +1,4 @@
 import { ImapFlow } from "imapflow";
-import nodemailer from "nodemailer";
 import { simpleParser } from "mailparser";
 
 function requireEnv(name) {
@@ -34,22 +33,12 @@ async function withImap(fn) {
   }
 }
 
-function smtpTransport() {
-  const host = requireEnv("SMTP_HOST");
-  const port = Number(process.env.SMTP_PORT || 465);
-  const user = process.env.SMTP_USER || requireEnv("IMAP_USER");
-  const pass = process.env.SMTP_PASSWORD || requireEnv("IMAP_PASSWORD");
-  const secure = (process.env.SMTP_SECURE ?? (port === 465 ? "true" : "false")) === "true";
-  return nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth: { user, pass },
-    connectionTimeout: 15_000,
-    greetingTimeout: 15_000,
-    socketTimeout: 30_000,
-  });
-}
+// Sending goes through a small PHP relay hosted on the same cPanel account
+// as the mailbox (see relay/send.php), not raw SMTP. Render's outbound SMTP
+// ports get blocked (25/465/587 all time out) even though IMAP works fine,
+// so the relay lets the mail server send the message locally, on its own
+// machine, instead of over a network path that gets blocked. The relay is
+// still entirely your own infrastructure — no third-party mail service.
 
 export async function listFolders() {
   return withImap(async (client) => {
@@ -140,11 +129,23 @@ export async function sendEmail({ to, subject, body, cc, bcc, html = false }) {
   if (!to) throw new Error("to is required");
   if (!subject) throw new Error("subject is required");
   if (!body) throw new Error("body is required");
-  const transport = smtpTransport();
-  const from = process.env.SMTP_USER || requireEnv("IMAP_USER");
-  const mail = { from, to, cc, bcc, subject };
-  if (html) mail.html = body;
-  else mail.text = body;
-  const info = await transport.sendMail(mail);
-  return { messageId: info.messageId, accepted: info.accepted, rejected: info.rejected };
+
+  const relayUrl = requireEnv("RELAY_URL");
+  const relaySecret = requireEnv("RELAY_SECRET");
+
+  const res = await fetch(relayUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${relaySecret}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ to, subject, body, cc, bcc, html }),
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    throw new Error(`Relay error: ${data.error || `HTTP ${res.status}`}`);
+  }
+
+  return { accepted: data.accepted || [], rejected: [] };
 }
