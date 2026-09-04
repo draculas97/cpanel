@@ -1,199 +1,204 @@
-import crypto from "node:crypto";
+import express from "express";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { z } from "zod";
 import {
-  InvalidGrantError,
-  InvalidTokenError,
-  InvalidClientError,
-} from "@modelcontextprotocol/sdk/server/auth/errors.js";
+  mcpAuthRouter,
+  getOAuthProtectedResourceMetadataUrl,
+} from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
+import { listFolders, listEmails, readEmail, sendEmail } from "./mailClient.js";
+import { createOAuthProvider } from "./oauth.js";
  
-const AUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const ACCESS_TOKEN_TTL_SECONDS = 60 * 60; // 1 hour
+const PORT = Number(process.env.PORT || 3000);
  
-function randomToken(bytes = 32) {
-  return crypto.randomBytes(bytes).toString("hex");
-}
- 
-function escapeHtml(s) {
-  return String(s ?? "").replace(
-    /[&<>"']/g,
-    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+// This same value is both the legacy path-token (no longer used) and the
+// passphrase you type into the one-time browser "Authorize" screen when
+// Claude connects. Reusing MCP_TOKEN means no new env var is required for
+// anyone who already deployed the earlier version of this server.
+const AUTH_PASSWORD = process.env.AUTH_PASSWORD || process.env.MCP_TOKEN;
+if (!AUTH_PASSWORD) {
+  console.error(
+    "FATAL: set AUTH_PASSWORD (or MCP_TOKEN) — the passphrase used to approve the one-time browser login when Claude connects. Refusing to start."
   );
+  process.exit(1);
 }
  
-function renderLoginPage({ error, clientId, clientName, redirectUri, state, codeChallenge, scope, resource }) {
-  return `<!doctype html>
-<html><head><meta charset="utf-8"><title>Authorize access</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  body{font-family:system-ui,sans-serif;background:#0b0f14;color:#e6edf3;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
-  form{background:#151b23;padding:32px;border-radius:12px;width:320px;max-width:90vw;box-shadow:0 8px 24px rgba(0,0,0,.4)}
-  h1{font-size:18px;margin:0 0 8px}
-  p{font-size:13px;color:#9aa7b2;margin:0 0 20px}
-  input[type=password]{width:100%;padding:10px;border-radius:6px;border:1px solid #2d3742;background:#0b0f14;color:#e6edf3;box-sizing:border-box;font-size:14px}
-  button{width:100%;margin-top:16px;padding:10px;border-radius:6px;border:none;background:#2f81f7;color:white;font-size:14px;cursor:pointer}
-  .err{color:#f85149;font-size:13px;margin-top:12px}
-</style></head>
-<body>
-<form method="POST" action="/login">
-  <h1>Authorize "${escapeHtml(clientName)}"</h1>
-  <p>This app is requesting access to your mailbox. Enter your access passphrase to allow it.</p>
-  <input type="password" name="password" placeholder="Access passphrase" autofocus required />
-  <input type="hidden" name="client_id" value="${escapeHtml(clientId)}" />
-  <input type="hidden" name="redirect_uri" value="${escapeHtml(redirectUri)}" />
-  <input type="hidden" name="state" value="${escapeHtml(state)}" />
-  <input type="hidden" name="code_challenge" value="${escapeHtml(codeChallenge)}" />
-  <input type="hidden" name="scope" value="${escapeHtml(scope)}" />
-  <input type="hidden" name="resource" value="${escapeHtml(resource)}" />
-  <button type="submit">Authorize</button>
-  ${error ? `<div class="err">${escapeHtml(error)}</div>` : ""}
-</form>
-</body></html>`;
+// The public HTTPS URL this service is reachable at. Render sets
+// RENDER_EXTERNAL_URL automatically; BASE_URL is there as an override/for
+// other hosts.
+const rawBaseUrl = process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL;
+if (!rawBaseUrl) {
+  console.error(
+    "FATAL: set BASE_URL to this service's public HTTPS URL (e.g. https://your-app.onrender.com). On Render this is normally set automatically via RENDER_EXTERNAL_URL. Refusing to start."
+  );
+  process.exit(1);
+}
+const BASE_URL = new URL(rawBaseUrl.replace(/\/+$/, "") + "/");
+const RESOURCE_URL = new URL("mcp", BASE_URL);
+ 
+const { provider, approveLogin } = createOAuthProvider({ authPassword: AUTH_PASSWORD });
+ 
+function buildServer() {
+  const server = new McpServer(
+    { name: "cpanel-mail-mcp", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
+ 
+  server.registerTool(
+    "list_folders",
+    {
+      title: "List mail folders",
+      description: "List the folders/mailboxes available in this mailbox (e.g. INBOX, Sent, Drafts).",
+      inputSchema: {},
+    },
+    async () => {
+      const folders = await listFolders();
+      return { content: [{ type: "text", text: JSON.stringify(folders, null, 2) }] };
+    }
+  );
+ 
+  server.registerTool(
+    "list_emails",
+    {
+      title: "List emails",
+      description:
+        "List recent emails in a folder (default INBOX), newest first. Returns uid, subject, from, to, date, seen, size for each.",
+      inputSchema: {
+        folder: z.string().optional().describe("Mailbox folder path, default INBOX"),
+        limit: z.number().int().min(1).max(100).optional().describe("Max number of messages to return, default 20"),
+        unseen_only: z.boolean().optional().describe("Only return unread messages, default false"),
+      },
+    },
+    async ({ folder, limit, unseen_only }) => {
+      const result = await listEmails({
+        folder: folder || "INBOX",
+        limit: limit || 20,
+        unseenOnly: !!unseen_only,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+ 
+  server.registerTool(
+    "read_email",
+    {
+      title: "Read email",
+      description: "Fetch the full content (text/html body, headers, attachment list) of one email by uid.",
+      inputSchema: {
+        uid: z.number().int().describe("The message UID, as returned by list_emails"),
+        folder: z.string().optional().describe("Mailbox folder path, default INBOX"),
+      },
+    },
+    async ({ uid, folder }) => {
+      const result = await readEmail({ uid, folder: folder || "INBOX" });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+ 
+  server.registerTool(
+    "send_email",
+    {
+      title: "Send email",
+      description: "Send an email from this mailbox via SMTP.",
+      inputSchema: {
+        to: z.string().describe("Recipient email address(es), comma-separated"),
+        subject: z.string().describe("Email subject"),
+        body: z.string().describe("Email body content"),
+        cc: z.string().optional().describe("CC recipient(s), comma-separated"),
+        bcc: z.string().optional().describe("BCC recipient(s), comma-separated"),
+        html: z.boolean().optional().describe("Set true if body is HTML, default false (plain text)"),
+      },
+    },
+    async ({ to, subject, body, cc, bcc, html }) => {
+      const result = await sendEmail({ to, subject, body, cc, bcc, html: !!html });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+ 
+  return server;
 }
  
-/**
- * A minimal, single-user, in-memory OAuth 2.1 provider for the MCP SDK's
- * auth router. Suitable for a personal server with one owner. State is
- * lost on process restart, which just means clients re-authorize.
- */
-export function createOAuthProvider({ authPassword }) {
-  if (!authPassword) {
-    throw new Error("authPassword is required to create the OAuth provider.");
-  }
+const app = express();
+// Render sits in front of this app as a single reverse-proxy hop; trusting
+// it lets express-rate-limit (used inside the SDK's OAuth routes) read the
+// real client IP from X-Forwarded-For instead of rejecting the header.
+app.set("trust proxy", 1);
  
-  const clients = new Map(); // client_id -> OAuthClientInformationFull
-  const authCodes = new Map(); // code -> { clientId, codeChallenge, redirectUri, scopes, resource, expiresAt }
-  const accessTokens = new Map(); // token -> { clientId, scopes, resource, expiresAt(seconds) }
-  const refreshTokens = new Map(); // token -> { clientId, scopes, resource }
+// Mounts /authorize, /token, /register, /revoke, and the
+// /.well-known/oauth-authorization-server + /.well-known/oauth-protected-resource/mcp
+// metadata endpoints Claude's connector uses to discover and register itself.
+app.use(
+  mcpAuthRouter({
+    provider,
+    issuerUrl: BASE_URL,
+    baseUrl: BASE_URL,
+    resourceServerUrl: RESOURCE_URL,
+    resourceName: "Stacia Mail",
+  })
+);
  
-  function issueTokens(clientId, scopes, resource, { includeRefresh = true } = {}) {
-    const access_token = randomToken();
-    const expiresAt = Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS;
-    accessTokens.set(access_token, { clientId, scopes, resource, expiresAt });
-    const tokens = {
-      access_token,
-      token_type: "Bearer",
-      expires_in: ACCESS_TOKEN_TTL_SECONDS,
-      scope: scopes.join(" "),
-    };
-    if (includeRefresh) {
-      const refresh_token = randomToken();
-      refreshTokens.set(refresh_token, { clientId, scopes, resource });
-      tokens.refresh_token = refresh_token;
+// Handles the POST from the login form that provider.authorize() renders.
+// Kept as its own top-level route (not nested under /authorize) so it
+// doesn't collide with the auth router's own method handling there.
+app.use(express.urlencoded({ extended: false }));
+app.post("/login", (req, res) => {
+  try {
+    const result = approveLogin(req.body || {});
+    if (result.ok) {
+      res.redirect(302, result.redirect);
+    } else {
+      res.status(401).type("html").send(result.html);
     }
-    return tokens;
+  } catch (err) {
+    console.error("Login error:", err);
+    res.status(400).send("Invalid or expired authorization request. Please try connecting again from Claude.");
   }
+});
  
-  const clientsStore = {
-    getClient(clientId) {
-      return clients.get(clientId);
-    },
-    registerClient(clientInfo) {
-      clients.set(clientInfo.client_id, clientInfo);
-      return clientInfo;
-    },
-  };
+app.use(express.json({ limit: "10mb" }));
  
-  const provider = {
-    clientsStore,
+const requireAuth = requireBearerAuth({
+  verifier: provider,
+  resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(RESOURCE_URL),
+});
  
-    async authorize(client, params, res) {
-      const html = renderLoginPage({
-        error: null,
-        clientId: client.client_id,
-        clientName: client.client_name || client.client_id,
-        redirectUri: params.redirectUri,
-        state: params.state || "",
-        codeChallenge: params.codeChallenge,
-        scope: (params.scopes || []).join(" "),
-        resource: params.resource ? params.resource.href : "",
-      });
-      res.type("html").send(html);
-    },
- 
-    async challengeForAuthorizationCode(client, authorizationCode) {
-      const record = authCodes.get(authorizationCode);
-      if (!record || record.clientId !== client.client_id || record.expiresAt < Date.now()) {
-        throw new InvalidGrantError("Invalid or expired authorization code");
-      }
-      return record.codeChallenge;
-    },
- 
-    async exchangeAuthorizationCode(client, authorizationCode, _codeVerifier, redirectUri, resource) {
-      const record = authCodes.get(authorizationCode);
-      if (!record || record.clientId !== client.client_id || record.expiresAt < Date.now()) {
-        throw new InvalidGrantError("Invalid or expired authorization code");
-      }
-      authCodes.delete(authorizationCode); // single use
-      return issueTokens(client.client_id, record.scopes, resource || record.resource);
-    },
- 
-    async exchangeRefreshToken(client, refreshToken, scopes, resource) {
-      const record = refreshTokens.get(refreshToken);
-      if (!record || record.clientId !== client.client_id) {
-        throw new InvalidGrantError("Invalid refresh token");
-      }
-      return issueTokens(client.client_id, scopes || record.scopes, resource || record.resource, {
-        includeRefresh: false,
-      });
-    },
- 
-    async verifyAccessToken(token) {
-      const record = accessTokens.get(token);
-      if (!record || (record.expiresAt && record.expiresAt < Math.floor(Date.now() / 1000))) {
-        throw new InvalidTokenError("Invalid or expired access token");
-      }
-      return {
-        token,
-        clientId: record.clientId,
-        scopes: record.scopes,
-        expiresAt: record.expiresAt,
-        resource: record.resource,
-      };
-    },
- 
-    async revokeToken(_client, request) {
-      accessTokens.delete(request.token);
-      refreshTokens.delete(request.token);
-    },
-  };
- 
-  /**
-   * Handles the POST from the login form rendered by `authorize`.
-   * Returns either { ok: true, redirect } or { ok: false, html } (a
-   * re-rendered form with an error message, for the caller to send back).
-   */
-  function approveLogin({ password, client_id, redirect_uri, state, code_challenge, scope, resource }) {
-    const client = clients.get(client_id);
-    if (!client) throw new InvalidClientError("Unknown client");
- 
-    if (password !== authPassword) {
-      const html = renderLoginPage({
-        error: "Incorrect passphrase. Try again.",
-        clientId: client_id,
-        clientName: client.client_name || client_id,
-        redirectUri: redirect_uri,
-        state,
-        codeChallenge: code_challenge,
-        scope,
-        resource,
-      });
-      return { ok: false, html };
-    }
- 
-    const code = randomToken(24);
-    authCodes.set(code, {
-      clientId: client_id,
-      codeChallenge: code_challenge,
-      redirectUri: redirect_uri,
-      scopes: scope ? scope.split(" ").filter(Boolean) : [],
-      resource: resource ? new URL(resource) : undefined,
-      expiresAt: Date.now() + AUTH_CODE_TTL_MS,
+app.post("/mcp", requireAuth, async (req, res) => {
+  try {
+    const server = buildServer();
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on("close", () => {
+      transport.close();
+      server.close();
     });
- 
-    const redirect = new URL(redirect_uri);
-    redirect.searchParams.set("code", code);
-    if (state) redirect.searchParams.set("state", state);
-    return { ok: true, redirect: redirect.href };
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (err) {
+    console.error("MCP request error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        jsonrpc: "2.0",
+        error: { code: -32603, message: "Internal server error" },
+        id: null,
+      });
+    }
   }
+});
  
-  return { provider, approveLogin };
-}
+app.get("/mcp", requireAuth, (req, res) => {
+  res.status(405).json({
+    jsonrpc: "2.0",
+    error: { code: -32000, message: "Method not allowed. This server is stateless (POST only)." },
+    id: null,
+  });
+});
+ 
+app.get("/", (req, res) => {
+  res.status(200).send("cpanel-mail-mcp is running.");
+});
+ 
+app.listen(PORT, () => {
+  console.log(`cpanel-mail-mcp listening on port ${PORT}`);
+  console.log(`OAuth issuer: ${BASE_URL.href}`);
+  console.log(`MCP endpoint: ${RESOURCE_URL.href}`);
+});
