@@ -4,21 +4,21 @@ import {
   InvalidTokenError,
   InvalidClientError,
 } from "@modelcontextprotocol/sdk/server/auth/errors.js";
-
+ 
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60; // 1 hour
-
+ 
 function randomToken(bytes = 32) {
   return crypto.randomBytes(bytes).toString("hex");
 }
-
+ 
 function escapeHtml(s) {
   return String(s ?? "").replace(
     /[&<>"']/g,
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
   );
 }
-
+ 
 function renderLoginPage({ error, clientId, clientName, redirectUri, state, codeChallenge, scope, resource }) {
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Authorize access</title>
@@ -48,7 +48,7 @@ function renderLoginPage({ error, clientId, clientName, redirectUri, state, code
 </form>
 </body></html>`;
 }
-
+ 
 /**
  * A minimal, single-user, in-memory OAuth 2.1 provider for the MCP SDK's
  * auth router. Suitable for a personal server with one owner. State is
@@ -58,12 +58,12 @@ export function createOAuthProvider({ authPassword }) {
   if (!authPassword) {
     throw new Error("authPassword is required to create the OAuth provider.");
   }
-
+ 
   const clients = new Map(); // client_id -> OAuthClientInformationFull
   const authCodes = new Map(); // code -> { clientId, codeChallenge, redirectUri, scopes, resource, expiresAt }
   const accessTokens = new Map(); // token -> { clientId, scopes, resource, expiresAt(seconds) }
   const refreshTokens = new Map(); // token -> { clientId, scopes, resource }
-
+ 
   function issueTokens(clientId, scopes, resource, { includeRefresh = true } = {}) {
     const access_token = randomToken();
     const expiresAt = Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS;
@@ -81,7 +81,7 @@ export function createOAuthProvider({ authPassword }) {
     }
     return tokens;
   }
-
+ 
   const clientsStore = {
     getClient(clientId) {
       return clients.get(clientId);
@@ -91,10 +91,10 @@ export function createOAuthProvider({ authPassword }) {
       return clientInfo;
     },
   };
-
+ 
   const provider = {
     clientsStore,
-
+ 
     async authorize(client, params, res) {
       const html = renderLoginPage({
         error: null,
@@ -108,7 +108,7 @@ export function createOAuthProvider({ authPassword }) {
       });
       res.type("html").send(html);
     },
-
+ 
     async challengeForAuthorizationCode(client, authorizationCode) {
       const record = authCodes.get(authorizationCode);
       if (!record || record.clientId !== client.client_id || record.expiresAt < Date.now()) {
@@ -116,7 +116,7 @@ export function createOAuthProvider({ authPassword }) {
       }
       return record.codeChallenge;
     },
-
+ 
     async exchangeAuthorizationCode(client, authorizationCode, _codeVerifier, redirectUri, resource) {
       const record = authCodes.get(authorizationCode);
       if (!record || record.clientId !== client.client_id || record.expiresAt < Date.now()) {
@@ -125,7 +125,7 @@ export function createOAuthProvider({ authPassword }) {
       authCodes.delete(authorizationCode); // single use
       return issueTokens(client.client_id, record.scopes, resource || record.resource);
     },
-
+ 
     async exchangeRefreshToken(client, refreshToken, scopes, resource) {
       const record = refreshTokens.get(refreshToken);
       if (!record || record.clientId !== client.client_id) {
@@ -135,7 +135,7 @@ export function createOAuthProvider({ authPassword }) {
         includeRefresh: false,
       });
     },
-
+ 
     async verifyAccessToken(token) {
       const record = accessTokens.get(token);
       if (!record || (record.expiresAt && record.expiresAt < Math.floor(Date.now() / 1000))) {
@@ -149,13 +149,13 @@ export function createOAuthProvider({ authPassword }) {
         resource: record.resource,
       };
     },
-
+ 
     async revokeToken(_client, request) {
       accessTokens.delete(request.token);
       refreshTokens.delete(request.token);
     },
   };
-
+ 
   /**
    * Handles the POST from the login form rendered by `authorize`.
    * Returns either { ok: true, redirect } or { ok: false, html } (a
@@ -164,7 +164,7 @@ export function createOAuthProvider({ authPassword }) {
   function approveLogin({ password, client_id, redirect_uri, state, code_challenge, scope, resource }) {
     const client = clients.get(client_id);
     if (!client) throw new InvalidClientError("Unknown client");
-
+ 
     if (password !== authPassword) {
       const html = renderLoginPage({
         error: "Incorrect passphrase. Try again.",
@@ -178,7 +178,7 @@ export function createOAuthProvider({ authPassword }) {
       });
       return { ok: false, html };
     }
-
+ 
     const code = randomToken(24);
     authCodes.set(code, {
       clientId: client_id,
@@ -188,12 +188,12 @@ export function createOAuthProvider({ authPassword }) {
       resource: resource ? new URL(resource) : undefined,
       expiresAt: Date.now() + AUTH_CODE_TTL_MS,
     });
-
+ 
     const redirect = new URL(redirect_uri);
     redirect.searchParams.set("code", code);
     if (state) redirect.searchParams.set("state", state);
     return { ok: true, redirect: redirect.href };
   }
-
+ 
   return { provider, approveLogin };
 }
