@@ -1,5 +1,6 @@
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
+import MailComposer from "nodemailer/lib/mail-composer/index.js";
 
 function requireEnv(name) {
   const v = process.env[name];
@@ -125,6 +126,46 @@ export async function readEmail({ folder = "INBOX", uid }) {
   });
 }
 
+const SENT_FOLDER = process.env.SENT_FOLDER || "INBOX.Sent";
+
+function fromAddress() {
+  return process.env.MAIL_FROM_ADDRESS || process.env.IMAP_USER || "";
+}
+
+function fromName() {
+  return process.env.MAIL_FROM_NAME || "Sarabesh Sriram";
+}
+
+// Build a raw RFC822 message matching what was actually sent, so the copy
+// saved to the Sent folder looks the same as the one delivered via the relay.
+function buildRawMessage({ to, subject, body, cc, bcc, html }) {
+  return new Promise((resolve, reject) => {
+    const mail = new MailComposer({
+      from: `"${fromName()}" <${fromAddress()}>`,
+      to,
+      cc: cc || undefined,
+      bcc: bcc || undefined,
+      subject,
+      text: html ? undefined : body,
+      html: html ? body : undefined,
+    });
+    mail.compile().build((err, message) => {
+      if (err) reject(err);
+      else resolve(message);
+    });
+  });
+}
+
+// PHP's mail() sends the message straight to the local MTA — it never touches
+// IMAP, so nothing gets copied to Sent the way a normal mail client would do
+// it. We do that step ourselves: append a copy of what was sent to the Sent
+// folder over IMAP, marked as already read.
+async function appendToSent(rawMessage) {
+  return withImap(async (client) => {
+    await client.append(SENT_FOLDER, rawMessage, ["\\Seen"]);
+  });
+}
+
 const RELAY_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
@@ -192,5 +233,23 @@ export async function sendEmail({ to, subject, body, cc, bcc, html = false }) {
     );
   }
 
-  return { accepted: data.accepted || [], rejected: [] };
+  let savedToSent = false;
+  let sentFolderError = null;
+  try {
+    const raw = await buildRawMessage({ to, subject, body, cc, bcc, html });
+    await appendToSent(raw);
+    savedToSent = true;
+  } catch (err) {
+    // Don't fail the whole send just because the Sent-folder copy failed —
+    // the message was already delivered. Surface the problem instead so it
+    // shows up in logs / the tool response rather than failing silently.
+    sentFolderError = err?.message || String(err);
+  }
+
+  return {
+    accepted: data.accepted || [],
+    rejected: [],
+    savedToSent,
+    ...(sentFolderError ? { sentFolderError } : {}),
+  };
 }
