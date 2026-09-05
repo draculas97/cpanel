@@ -87,8 +87,16 @@ export function createOAuthProvider({ authPassword }) {
       return clients.get(clientId);
     },
     registerClient(clientInfo) {
-      clients.set(clientInfo.client_id, clientInfo);
-      return clientInfo;
+      // Force every dynamically-registered client to be treated as public
+      // (PKCE-only, no client_secret). Claude's MCP connector does the
+      // authorization_code + PKCE dance but never sends back a
+      // client_secret at the /token step, even when one was issued here.
+      // The SDK's authenticateClient middleware only requires a secret
+      // when the stored client record has one, so stripping it at
+      // registration time is what actually fixes the token exchange.
+      const { client_secret, client_secret_expires_at, ...publicClientInfo } = clientInfo;
+      clients.set(publicClientInfo.client_id, publicClientInfo);
+      return publicClientInfo;
     },
   };
 
