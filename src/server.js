@@ -7,7 +7,7 @@ import {
   getOAuthProtectedResourceMetadataUrl,
 } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
-import { listFolders, listEmails, readEmail, sendEmail } from "./mailClient.js";
+import { listFolders, listEmails, readEmail, sendEmail, draftEmail } from "./mailClient.js";
 import { createOAuthProvider } from "./oauth.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -19,7 +19,7 @@ const PORT = Number(process.env.PORT || 3000);
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD || process.env.MCP_TOKEN;
 if (!AUTH_PASSWORD) {
   console.error(
-    "FATAL: set AUTH_PASSWORD (or MCP_TOKEN) â the passphrase used to approve the one-time browser login when Claude connects. Refusing to start."
+    "FATAL: set AUTH_PASSWORD (or MCP_TOKEN) — the passphrase used to approve the one-time browser login when Claude connects. Refusing to start."
   );
   process.exit(1);
 }
@@ -100,11 +100,12 @@ function buildServer() {
     "send_email",
     {
       title: "Send email",
-      description: "Send an email from this mailbox via SMTP.",
+      description:
+        "Send an email from this mailbox immediately (actually delivers it). The Stacia Corp signature is added automatically — pass just the message content in body. Default workflow is draft_email instead; only use this when explicitly asked to send right away.",
       inputSchema: {
         to: z.string().describe("Recipient email address(es), comma-separated"),
         subject: z.string().describe("Email subject"),
-        body: z.string().describe("Email body content"),
+        body: z.string().describe("Email message content (signature is appended automatically, do not include it)"),
         cc: z.string().optional().describe("CC recipient(s), comma-separated"),
         bcc: z.string().optional().describe("BCC recipient(s), comma-separated"),
         html: z.boolean().optional().describe("Set true if body is HTML, default false (plain text)"),
@@ -112,6 +113,27 @@ function buildServer() {
     },
     async ({ to, subject, body, cc, bcc, html }) => {
       const result = await sendEmail({ to, subject, body, cc, bcc, html: !!html });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "draft_email",
+    {
+      title: "Draft email",
+      description:
+        "Save a composed email to the Drafts folder for review — does NOT send it. The Stacia Corp signature (with logo and images) is added automatically — pass just the message content in body. This is the default way to prepare an email; the mailbox owner reviews and sends it themselves.",
+      inputSchema: {
+        to: z.string().describe("Recipient email address(es), comma-separated"),
+        subject: z.string().describe("Email subject"),
+        body: z.string().describe("Email message content (signature is appended automatically, do not include it)"),
+        cc: z.string().optional().describe("CC recipient(s), comma-separated"),
+        bcc: z.string().optional().describe("BCC recipient(s), comma-separated"),
+        html: z.boolean().optional().describe("Set true if body is HTML, default false (plain text)"),
+      },
+    },
+    async ({ to, subject, body, cc, bcc, html }) => {
+      const result = await draftEmail({ to, subject, body, cc, bcc, html: !!html });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
