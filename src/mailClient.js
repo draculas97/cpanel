@@ -1,6 +1,12 @@
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
+import {
+  signatureImages,
+  signatureHtmlCid,
+  signatureHtmlHosted,
+  signaturePlainText,
+} from "./signature.js";
 
 function requireEnv(name) {
   const v = process.env[name];
@@ -127,6 +133,7 @@ export async function readEmail({ folder = "INBOX", uid }) {
 }
 
 const SENT_FOLDER = process.env.SENT_FOLDER || "INBOX.Sent";
+const DRAFTS_FOLDER = process.env.DRAFTS_FOLDER || "INBOX.Drafts";
 
 function fromAddress() {
   return process.env.MAIL_FROM_ADDRESS || process.env.IMAP_USER || "";
@@ -136,18 +143,53 @@ function fromName() {
   return process.env.MAIL_FROM_NAME || "Sarabesh Sriram";
 }
 
-// Build a raw RFC822 message matching what was actually sent, so the copy
-// saved to the Sent folder looks the same as the one delivered via the relay.
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// Strip tags for a plain-text MIME alternative — good enough for a fallback,
+// doesn't need to be perfect.
+function stripHtml(html) {
+  return String(html)
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|tr)>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// Every email this system produces carries the Stacia Corp signature —
+// composed here, once, rather than retyped by hand each time (which is how
+// the signature's images ended up corrupted in an earlier draft). Raw MIME
+// messages (drafts, and the copy saved to Sent) embed the signature images
+// as inline CID attachments so nothing needs to be fetched after delivery.
+function composeRawContent({ body, html }) {
+  const bodyHtml = html ? body : escapeHtml(body).replace(/\n/g, "<br>");
+  const fullHtml = `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #333333;">${bodyHtml}</div>${signatureHtmlCid()}`;
+  const bodyText = html ? stripHtml(body) : body;
+  const fullText = `${bodyText}${signaturePlainText()}`;
+  return { html: fullHtml, text: fullText };
+}
+
+// Build a raw RFC822 message (with the signature + inline CID images) for
+// use with IMAP APPEND — either a Drafts entry, or the copy saved to Sent
+// after an actual send.
 function buildRawMessage({ to, subject, body, cc, bcc, html }) {
   return new Promise((resolve, reject) => {
+    const composed = composeRawContent({ body, html });
     const mail = new MailComposer({
       from: `"${fromName()}" <${fromAddress()}>`,
       to,
       cc: cc || undefined,
       bcc: bcc || undefined,
       subject,
-      text: html ? undefined : body,
-      html: html ? body : undefined,
+      text: composed.text,
+      html: composed.html,
+      attachments: signatureImages(),
     });
     mail.compile().build((err, message) => {
       if (err) reject(err);
@@ -164,6 +206,22 @@ async function appendToSent(rawMessage) {
   return withImap(async (client) => {
     await client.append(SENT_FOLDER, rawMessage, ["\\Seen"]);
   });
+}
+
+// Save a composed email to the Drafts folder for review, instead of actually
+// sending it. This is the default path — nothing goes out until the message
+// is sent by hand.
+export async function draftEmail({ to, subject, body, cc, bcc, html = false }) {
+  if (!to) throw new Error("to is required");
+  if (!subject) throw new Error("subject is required");
+  if (!body) throw new Error("body is required");
+
+  const raw = await buildRawMessage({ to, subject, body, cc, bcc, html });
+  await withImap(async (client) => {
+    await client.append(DRAFTS_FOLDER, raw, ["\\Draft"]);
+  });
+
+  return { drafted: true, folder: DRAFTS_FOLDER, to, subject };
 }
 
 const RELAY_USER_AGENT =
@@ -198,7 +256,12 @@ export async function sendEmail({ to, subject, body, cc, bcc, html = false }) {
 
   const relayUrl = requireEnv("RELAY_URL");
   const relaySecret = requireEnv("RELAY_SECRET");
-  const payload = { to, subject, body, cc, bcc, html };
+  // The relay (PHP mail()) can't carry attachments, so the signature here
+  // uses the hosted copies of the images rather than inline CID — the
+  // Sent-folder copy below embeds them properly instead.
+  const bodyHtml = html ? body : escapeHtml(body).replace(/\n/g, "<br>");
+  const composedHtml = `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #333333;">${bodyHtml}</div>${signatureHtmlHosted()}`;
+  const payload = { to, subject, body: composedHtml, cc, bcc, html: true };
 
   let { res, rawText } = await postToRelay(relayUrl, relaySecret, payload);
 
