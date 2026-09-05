@@ -19,6 +19,26 @@ const ICONS_B64 =
 
 const HOSTED_ASSETS_BASE = "https://staciacorp.com/mail-signature-assets";
 
+// Applies to every tenant unless its `signature_json` overrides a field —
+// keeps the existing "Stacia Mail" mailbox's signature byte-identical after
+// the multi-tenant migration. A tenant's override is a partial object with
+// any of: name, title, phones (array), emails (array), address, website,
+// tagline. Custom per-tenant logo/brand images are not supported yet — all
+// tenants share the Stacia brand images below.
+const DEFAULT_SIGNATURE = {
+  name: "Sarabesh Sriram",
+  title: "Founder Partner, Chief Executive Officer",
+  phones: ["Mobile : +91-87 5459 5641", "Phone : +91-44 2250 4150", "Mobile : +91-93 6303 4150"],
+  emails: ["sarabeshsriram@staciacorp.com", "contactus@staciacorp.com"],
+  address: "Ground Floor, C-53, Guindy Industrial Estate, Chennai, Tamil Nadu 600032",
+  website: "https://www.staciacorp.com",
+  tagline: "Stacia Corp Celebrates 6 years of Innovation !!!",
+};
+
+function resolveSignature(override) {
+  return { ...DEFAULT_SIGNATURE, ...(override || {}) };
+}
+
 export function signatureImages() {
   return [
     {
@@ -42,26 +62,33 @@ export function signatureImages() {
   ];
 }
 
-function signatureBlock({ logoSrc, yearsSrc, iconsSrc }) {
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function signatureBlock({ sig, logoSrc, yearsSrc, iconsSrc }) {
+  const s = resolveSignature(sig);
+  const phonesHtml = s.phones.map(escapeHtml).join(" &nbsp;|&nbsp; ");
+  const emailsHtml = s.emails
+    .map((e) => `Email: <a href="mailto:${escapeHtml(e)}" style="color:#1155cc;">${escapeHtml(e)}</a>`)
+    .join("<br>\n          ");
   return `
   <table cellpadding="0" cellspacing="0" border="0" style="border-top: 2px solid #0A2540; padding-top: 10px; margin-top: 16px; font-family: Arial, Helvetica, sans-serif;">
     <tr>
       <td style="vertical-align: top; padding-right: 20px; width: 340px;">
-        <div style="font-size: 16px; font-weight: bold; color: #111111;">Sarabesh Sriram</div>
-        <div style="font-size: 12px; color: #555555; margin-bottom: 8px;">Founder Partner, Chief Executive Officer</div>
+        <div style="font-size: 16px; font-weight: bold; color: #111111;">${escapeHtml(s.name)}</div>
+        <div style="font-size: 12px; color: #555555; margin-bottom: 8px;">${escapeHtml(s.title)}</div>
         <div style="border-top: 1px solid #cccccc; margin: 8px 0;"></div>
         <div style="font-size: 12px; line-height: 1.6; color: #333333;">
-          Mobile : +91-87 5459 5641 &nbsp;|&nbsp; Phone : +91-44 2250 4150<br>
-          Mobile : +91-93 6303 4150<br>
-          Email: <a href="mailto:sarabeshsriram@staciacorp.com" style="color:#1155cc;">sarabeshsriram@staciacorp.com</a><br>
-          Email: <a href="mailto:contactus@staciacorp.com" style="color:#1155cc;">contactus@staciacorp.com</a>
+          ${phonesHtml}<br>
+          ${emailsHtml}
         </div>
         <div style="font-size: 12px; line-height: 1.6; color: #333333; margin-top: 8px;">
-          Ground Floor, C-53, Guindy Industrial Estate, Chennai, Tamil Nadu 600032<br>
-          <a href="https://www.staciacorp.com" style="color:#1155cc;">www.staciacorp.com</a>
+          ${escapeHtml(s.address)}<br>
+          <a href="${escapeHtml(s.website)}" style="color:#1155cc;">${escapeHtml(s.website.replace(/^https?:\/\//, ""))}</a>
         </div>
         <div style="font-size: 14px; font-weight: bold; color: #1155cc; margin-top: 10px;">
-          Stacia Corp Celebrates 6 years of Innovation !!!
+          ${escapeHtml(s.tagline)}
         </div>
       </td>
       <td style="vertical-align: top; text-align: center; width: 260px;">
@@ -79,8 +106,9 @@ function signatureBlock({ logoSrc, yearsSrc, iconsSrc }) {
 }
 
 // For drafts / any raw MIME message that carries its own attachments.
-export function signatureHtmlCid() {
+export function signatureHtmlCid(sig) {
   return signatureBlock({
+    sig,
     logoSrc: "cid:stacia-logo",
     yearsSrc: "cid:stacia-years",
     iconsSrc: "cid:stacia-icons",
@@ -89,27 +117,27 @@ export function signatureHtmlCid() {
 
 // For the relay JSON payload (PHP mail(), no attachment support) — falls
 // back to the hosted copies of the same images.
-export function signatureHtmlHosted() {
+export function signatureHtmlHosted(sig) {
   return signatureBlock({
+    sig,
     logoSrc: `${HOSTED_ASSETS_BASE}/logo_small.png`,
     yearsSrc: `${HOSTED_ASSETS_BASE}/years_small.jpg`,
     iconsSrc: `${HOSTED_ASSETS_BASE}/icons_small.png`,
   });
 }
 
-export function signaturePlainText() {
+export function signaturePlainText(sig) {
+  const s = resolveSignature(sig);
   return `
 
 --
-Sarabesh Sriram
-Founder Partner, Chief Executive Officer
-Mobile: +91-87 5459 5641 | Phone: +91-44 2250 4150
-Mobile: +91-93 6303 4150
-Email: sarabeshsriram@staciacorp.com
-Email: contactus@staciacorp.com
-Ground Floor, C-53, Guindy Industrial Estate, Chennai, Tamil Nadu 600032
-www.staciacorp.com
+${s.name}
+${s.title}
+${s.phones.join("\n")}
+${s.emails.join("\n")}
+${s.address}
+${s.website}
 
-Stacia Corp Celebrates 6 years of Innovation !!!
+${s.tagline}
 `;
 }
