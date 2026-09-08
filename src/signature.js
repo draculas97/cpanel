@@ -17,7 +17,9 @@ const YEARS_B64 =
 const ICONS_B64 =
   "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";
 
-const HOSTED_ASSETS_BASE = "https://staciacorp.com/mail-signature-assets";
+const HOSTED_ASSETS_BASE =
+  process.env.SIGNATURE_ASSETS_BASE_URL ||
+  `${(process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || "https://cpanel-xwy1.onrender.com").replace(/\/+$/, "")}/mail-signature-assets`;
 
 export function signatureImages() {
   return [
@@ -40,6 +42,14 @@ export function signatureImages() {
       content: Buffer.from(ICONS_B64, "base64"),
     },
   ];
+}
+
+export function signatureAssetFiles() {
+  return {
+    "logo_small.png": { contentType: "image/png", buffer: Buffer.from(LOGO_B64, "base64") },
+    "years_small.jpg": { contentType: "image/jpeg", buffer: Buffer.from(YEARS_B64, "base64") },
+    "icons_small.png": { contentType: "image/png", buffer: Buffer.from(ICONS_B64, "base64") },
+  };
 }
 
 function signatureBlock({ logoSrc, yearsSrc, iconsSrc }) {
