@@ -9,6 +9,7 @@ import {
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { listFolders, listEmails, readEmail, sendEmail, draftEmail } from "./mailClient.js";
 import { createOAuthProvider } from "./oauth.js";
+import { signatureAssetFiles } from "./signature.js";
 
 const PORT = Number(process.env.PORT || 3000);
 
@@ -217,6 +218,17 @@ app.get("/mcp", requireAuth, (req, res) => {
 
 app.get("/", (req, res) => {
   res.status(200).send("cpanel-mail-mcp is running.");
+});
+
+app.get("/mail-signature-assets/:filename", (req, res) => {
+  const asset = signatureAssetFiles()[req.params.filename];
+  if (!asset) {
+    res.status(404).send("Not found");
+    return;
+  }
+  res.set("Content-Type", asset.contentType);
+  res.set("Cache-Control", "public, max-age=31536000, immutable");
+  res.send(asset.buffer);
 });
 
 app.listen(PORT, () => {
