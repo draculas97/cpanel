@@ -32,6 +32,7 @@ const ICON_INSTAGRAM_B64 =
 const HOSTED_ASSETS_BASE =
   process.env.SIGNATURE_ASSETS_BASE_URL ||
   `${(process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || "https://cpanel-xwy1.onrender.com").replace(/\/+$/, "")}/mail-signature-assets`;
+const ASSET_CACHE_BUST = "2026-09-08b"; // bump when hosted image bytes change, so mail-provider proxy caches (which ignore our Cache-Control) fetch fresh bytes instead of serving a stale cached copy forever
 
 // Where each icon links to.
 const SOCIAL_LINKS = {
@@ -163,13 +164,18 @@ export function signatureHtmlCid() {
 // signatureAssetFiles() above) rather than staciacorp.com directly, since
 // that host's bot-protection was blocking hosted-image fetches too.
 export function signatureHtmlHosted() {
+  // Cache-bust: some mail providers proxy/cache these hosted images by exact
+  // URL and ignore our Cache-Control header, so a URL that ever served a
+  // broken image can stay stale in their cache indefinitely. Appending
+  // ASSET_CACHE_BUST forces a fresh URL (and fresh fetch) whenever the
+  // underlying bytes change.
   return signatureBlock({
-    logoSrc: `${HOSTED_ASSETS_BASE}/logo_small.png`,
-    yearsSrc: `${HOSTED_ASSETS_BASE}/years_small.jpg`,
-    facebookSrc: `${HOSTED_ASSETS_BASE}/icon_facebook.png`,
-    linkedinSrc: `${HOSTED_ASSETS_BASE}/icon_linkedin.png`,
-    xSrc: `${HOSTED_ASSETS_BASE}/icon_x.png`,
-    instagramSrc: `${HOSTED_ASSETS_BASE}/icon_instagram.png`,
+    logoSrc: `${HOSTED_ASSETS_BASE}/logo_small.png?v=${ASSET_CACHE_BUST}`,
+    yearsSrc: `${HOSTED_ASSETS_BASE}/years_small.jpg?v=${ASSET_CACHE_BUST}`,
+    facebookSrc: `${HOSTED_ASSETS_BASE}/icon_facebook.png?v=${ASSET_CACHE_BUST}`,
+    linkedinSrc: `${HOSTED_ASSETS_BASE}/icon_linkedin.png?v=${ASSET_CACHE_BUST}`,
+    xSrc: `${HOSTED_ASSETS_BASE}/icon_x.png?v=${ASSET_CACHE_BUST}`,
+    instagramSrc: `${HOSTED_ASSETS_BASE}/icon_instagram.png?v=${ASSET_CACHE_BUST}`,
   });
 }
 
